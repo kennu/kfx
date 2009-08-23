@@ -161,11 +161,96 @@ enter_long_mode:
 
 [bits 64]
 boot_64:				; long mode 64-bit code starts here
-	;mov rsp, 0x00040000		; stack pointer at 0x00040000 (256k)
-	;lgdt [gdt64_desc]		; load 64-bit GDT
-	;lidt [idt64_desc]		; load 64-bit IDT
-	mov byte [0xb8000], '5'
-	;sti				; re-enable interrupts
+	lgdt [gdt64_desc]		; reload GDT in 64-bit mode
+	mov eax, KERNEL64_DATA		; reset segment registers
+	mov ss, eax
+	mov ds, eax
+	mov es, eax
+	mov fs, eax
+	mov gs, eax
+	mov rsp, 0x00040000		; stack pointer at 0x00040000 (256k)
+
+init_idt_64:				; setup ISR gate descriptors
+	mov rdi, idt64
+	mov rax, isr_00
+	call set_idt_desc
+	mov rax, isr_01
+	call set_idt_desc
+	mov rax, isr_02
+	call set_idt_desc
+	mov rax, isr_03
+	call set_idt_desc
+	mov rax, isr_04
+	call set_idt_desc
+	mov rax, isr_05
+	call set_idt_desc
+	mov rax, isr_06
+	call set_idt_desc
+	mov rax, isr_07
+	call set_idt_desc
+	mov rax, isr_08
+	call set_idt_desc
+	mov rax, isr_09
+	call set_idt_desc
+	mov rax, isr_0a
+	call set_idt_desc
+	mov rax, isr_0b
+	call set_idt_desc
+	mov rax, isr_0c
+	call set_idt_desc
+	mov rax, isr_0d
+	call set_idt_desc
+	mov rax, isr_0e
+	call set_idt_desc
+	mov rax, isr_0f
+	call set_idt_desc
+	
+	lidt [idt64_desc]		; load 64-bit IDT
+	jmp kernel_64
+
+set_idt_desc:				; routine to set IDT descriptor at RDI to handler at RAX
+	push rax
+	push rbx
+	push rcx
+	push rdx
+	
+	; Build the lower 64-bit word in RBX
+	
+	mov rbx, rax			; target offset 31-16 (0x00000000ffff0000) at low 0xffff000000000000
+	shl rbx, 32
+	mov rcx, 0xffff000000000000
+	and rbx, rcx
+	
+	mov rcx, 0x00008e0000000000	; flags (16 bits) at low 0x0000ffff00000000
+	or rbx, rcx			; flags: P:1(1) DP:2(00) 0:1(0), Type:4(0x0e), Reserved:5(00000), IST:3(000)
+	
+	mov rdx, KERNEL64_CODE		; target selector (16 bits) (0x000000000000ffff) at low 0x00000000ffff0000
+	shl rdx, 16
+	mov rcx, 0x00000000ffff0000
+	and rdx, rcx
+	or rbx, rdx
+	
+	mov rdx, rax			; target offset 15-0 (0x000000000000ffff) at low 0x000000000000ffff
+	mov rcx, 0x000000000000ffff
+	and rdx, rcx			
+	or rbx, rdx
+	
+	; Build the higher 64-bit word in RDX
+	
+	mov rdx, rax			; high 0xffffffff00000000 must be zero
+	shr rdx, 32			; target offset 64-32 (0xffffffff00000000) at high 0x00000000ffffffff
+	
+	mov rax, rbx			; First store lower 64-bit word
+	stosq
+	
+	mov rax, rdx			; Then the higher 64-bit word
+	stosq
+	
+	pop rdx
+	pop rcx
+	pop rbx
+	pop rax
+	ret				; at end, RDI will point to the next descriptor
 
 kernel_64:
 	mov ax, 0x1700			; show blue boot screen
@@ -173,52 +258,57 @@ kernel_64:
 	mov byte [0x00000000000b8000], ':'
 	mov byte [0x00000000000b8002], '-'
 	mov byte [0x00000000000b8004], ')'
-	jmp $
-	mov esi, msg_kernel_boot
+	mov rsi, msg_kernel_boot
 	call sub_printl
 	cmp dword [kernel_magic], 0xcaccaac0	; make sure whole kernel loaded
 	je magic_ok
-	mov esi, msg_kernel_bad_magic
+	mov rsi, msg_kernel_bad_magic
 	call sub_prints
-	mov esi, [kernel_magic]
-	mov cx, 4
+	mov rsi, [kernel_magic]
+	mov rcx, 4
 	call sub_printhexs
 	call sub_newl
 	magic_ok:
-	mov esi, msg_kernel_booted
+	mov rsi, msg_kernel_booted
 	call sub_printl
-	jmp kernel_panic
+	call sub_print_idt
+	sti				; re-enable interrupts
+	jmp main_loop
+
+main_loop:
+	hlt
+	jmp main_loop
+
+read_keyboard:
+	push rax
+	push rbx
+	push rsi
 	
-	mov cl, 0
-keyboard_loop:
-	inc cl
-	mov al, cl
 	in al, 0x64
 	and al, 0x01
-	jz keyboard_loop
-read_keyboard:
+	jz .end
 	in al, 0x60
 	mov bl, al
 	and bl, 0x80
-	jnz read_keyboard
-read_keyboard_down:
-	and eax, 0x7f
+	jnz .end
+	.keydown:
+	and rax, 0x7f
 	mov bl, al
-	mov esi, keyboard_map
-	add esi, eax
-	mov al, [esi]
+	mov rsi, keyboard_map
+	add rsi, rax
+	mov al, [rsi]
 	or al, al
-	jz keyboard_unknown_key
+	jz .unknown
 	cmp al, 13
-	je keyboard_enter
-keyboard_ascii_key:						; process ascii key, ascii in AL, scancode in BL
-	mov ecx, [command_pos]
-	mov [command_buffer+ecx], al
+	je .enter
+	.ascii:			; process ascii key, ascii in AL, scancode in BL
+	mov rcx, [command_pos]
+	mov [command_buffer+rcx], al
 	inc byte [command_pos]
 	call sub_printc
 	call sub_flush
-	jmp keyboard_loop
-keyboard_unknown_key:						; process unknown key, scancode in BL
+	jmp .end
+	.unknown:		; process unknown key, scancode in BL
 	mov al, '<'
 	call sub_printc
 	mov al, bl
@@ -226,33 +316,286 @@ keyboard_unknown_key:						; process unknown key, scancode in BL
 	mov al, '>'
 	call sub_printc
 	call sub_flush
-	jmp keyboard_loop
-keyboard_enter:							; process enter pressed
+	jmp .end
+	.enter:			; process enter pressed
 	call sub_newl
 	call parse_command
 	mov byte [command_pos], 0
-	jmp keyboard_loop
+	.end:
+	pop rsi
+	pop rbx
+	pop rax
+	ret
 
 parse_command:
-	mov esi, msg_unknown_command
+	mov rsi, msg_unknown_command
 	call sub_prints
-	mov ecx, [command_pos]
-	mov byte [command_buffer+ecx], 0
-	mov esi, command_buffer
+	mov rcx, [command_pos]
+	mov byte [command_buffer+rcx], 0
+	mov rsi, command_buffer
 	call sub_printl
 	ret
 
 ; Hang
 kernel_panic:
-	mov esi, msg_kernel_panic
+	mov rsi, msg_kernel_panic
 	call sub_printl
 kernel_panic_halt:
 	hlt
 	jmp kernel_panic_halt
 
+; Display the IDT
+sub_print_idt:
+	push rax
+	push rbx
+	push rcx
+	push rsi
+	
+	mov rsi, msg_idt_start
+	call sub_printl
+	
+	mov rsi, idt64			; start printing IDT
+	mov rcx, 16			; print N entries
+	mov rax, 0
+	sub_print_idt_loop:
+	call sub_print_idt_entry
+	inc rax
+	dec rcx
+	jnz sub_print_idt_loop
+	
+	mov rsi, msg_idt_end
+	call sub_printl
+	
+	pop rsi
+	pop rcx
+	pop rbx
+	pop rax
+	ret
+
+; Display IDT entry #RAX at memory RSI
+sub_print_idt_entry:
+	push rax
+	push rcx
+	
+	push rsi
+	mov rsi, msg_idt_entry
+	call sub_prints
+	call sub_printhexc		; print AL from RAX
+	mov al, ' '
+	call sub_printc
+	pop rsi
+	mov rcx, 16
+	call sub_printhexs		; print 16 bytes of RSI and increase
+	push rsi
+	call sub_newl
+	pop rsi
+	
+	pop rcx
+	pop rax
+	ret
+
+sub_update_int_status:
+	push rax
+	push rbx
+	push rcx
+	push rdx
+	push rsi
+	push rdi
+	
+	mov rdi, 0x00000000000b8000
+	mov rsi, isr_counters
+	mov rdx, 16
+	
+	.loopint:
+	add rdi, 159
+	mov rcx, 8
+	
+	.loopbyte:
+	cld
+	lodsb				; load next byte to RAX
+	mov rbx, rax
+	
+	std
+	mov rax, 0x4f			; color
+	stosb
+	mov rax, rbx
+	and al, 0x0f
+	cmp al, 9
+	jg .hex1
+	add al, '0'
+	jmp .go1
+	.hex1:
+	add al, 'a'-10
+	.go1:
+	stosb				; print nibble to screen
+	
+	mov rax, 0x4f			; color
+	stosb
+	mov rax, rbx
+	shr al, 4
+	and al, 0x0f
+	cmp al, 9
+	jg .hex2
+	add al, '0'
+	jmp .go2
+	.hex2:
+	add al, 'a'-10
+	.go2:
+	stosb				; print nibble to screen
+	
+	loopnz .loopbyte
+	
+	add rdi, 16*2+1
+	dec rdx
+	jnz .loopint
+	
+	pop rdi
+	pop rsi
+	pop rdx
+	pop rcx
+	pop rbx
+	pop rax
+	ret
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Subroutines
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; Interrupt Service Routines
+
+align 8
+isr_counters:
+isr_00_counter dq 0
+isr_01_counter dq 0
+isr_02_counter dq 0
+isr_03_counter dq 0
+isr_04_counter dq 0
+isr_05_counter dq 0
+isr_06_counter dq 0
+isr_07_counter dq 0
+isr_08_counter dq 0
+isr_09_counter dq 0
+isr_0a_counter dq 0
+isr_0b_counter dq 0
+isr_0c_counter dq 0
+isr_0d_counter dq 0
+isr_0e_counter dq 0
+isr_0f_counter dq 0
+
+align 8
+isr_00:
+	inc qword [isr_00_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_01:
+	inc qword [isr_01_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_02:					; NMI
+	inc qword [isr_02_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_03:
+	inc qword [isr_03_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_04:
+	inc qword [isr_04_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_05:
+	inc qword [isr_05_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_06:
+	inc qword [isr_06_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_07:
+	inc qword [isr_07_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_08:					; IRQ0 - System Timer 18.2 times/second
+	inc qword [isr_08_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_09:					; IRQ1 - Keyboard Data Ready
+	inc qword [isr_09_counter]
+	call sub_update_int_status
+	call read_keyboard
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0a:
+	inc qword [isr_0a_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0b:
+	inc qword [isr_0b_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0c:
+	inc qword [isr_0c_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0d:
+	inc qword [isr_0d_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0e:
+	inc qword [isr_0e_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
+isr_0f:
+	inc qword [isr_0f_counter]
+	call sub_update_int_status
+	mov al, 0x20			; acknowledge interrupt
+	out 0x20, al
+	iretq
+
 
 ; Update cursor to VGA
 
@@ -261,7 +604,7 @@ sub_updatecursor:
 	push rcx
 	push rdx
 	mov cx, [console_cursor]
-	shr cx, 1				; divide by 2
+	shr cx, 1			; divide by 2
 	mov dx, 0x3d4
 	mov al, 15
 	out dx, al
@@ -283,12 +626,16 @@ sub_updatecursor:
 sub_flush:
 	pushf
 	push rcx
-	mov ecx, 4000
-	mov esi, console_buffer
-	mov edi, 0xb8000
+	push rsi
+	push rdi
+	mov rcx, 4000
+	mov rsi, console_buffer
+	mov rdi, 0xb8000
 	cld
 	rep movsb
 	call sub_updatecursor
+	pop rdi
+	pop rsi
 	pop rcx
 	popf
 	ret
@@ -298,11 +645,11 @@ sub_clear_screen:
 	push rax
 	push rcx
 	push rdi
-	mov edi, console_buffer				; clear screen buffer
-	mov ecx, 2000
+	mov rdi, console_buffer		; clear screen buffer
+	mov rcx, 2000
 	rep stosw
-	xor ecx, ecx					; move cursor to 0,0
-	mov [console_cursor], ecx
+	xor rcx, rcx			; move cursor to 0,0
+	mov [console_cursor], rcx
 	pop rdi
 	pop rcx
 	pop rax
@@ -314,17 +661,17 @@ sub_scroll_line:
 	push rcx
 	push rsi
 	push rdi
-	mov eax, [console_cursor]			; get current cursor
-	sub eax, 160					; move it one row upwards
-	mov [console_cursor], eax			; store new cursor
-	mov ecx, 4000-160				; move n-1 rows of screen buffer
-	mov esi, console_buffer
-	add esi, 160
-	mov edi, console_buffer
+	mov rax, [console_cursor]	; get current cursor
+	sub rax, 160			; move it one row upwards
+	mov [console_cursor], rax	; store new cursor
+	mov rcx, 4000-160		; move n-1 rows of screen buffer
+	mov rsi, console_buffer
+	add rsi, 160
+	mov rdi, console_buffer
 	rep movsb
-	mov ecx, 80					; clear last row of screen buffer
-	mov edi, console_buffer
-	add edi, 4000-160
+	mov rcx, 80			; clear last row of screen buffer
+	mov rdi, console_buffer
+	add rdi, 4000-160
 	mov ax, 0x1700
 	rep stosw
 	pop rdi
@@ -340,15 +687,15 @@ sub_newl:
 	push rbx
 	push rcx
 	push rdx
-	mov eax, [console_cursor]		; get current cursor position
-	xor edx, edx
-	mov ebx, 160
-	div ebx					; divide by 160 => eax contains row, edx column
-	inc eax					; add one row
-	xor edx, edx
-	mul ebx					; multiply by 160 => eax contains new position
-	mov [console_cursor], eax		; set new cursor position
-	cmp eax, 4000
+	mov rax, [console_cursor]	; get current cursor position
+	xor rdx, rdx
+	mov rbx, 160
+	div rbx				; divide by 160 => eax contains row, edx column
+	inc rax				; add one row
+	xor rdx, rdx
+	mul rbx				; multiply by 160 => eax contains new position
+	mov [console_cursor], rax	; set new cursor position
+	cmp rax, 4000
 	jne sub_newl_no_scroll
 	call sub_scroll_line
 	sub_newl_no_scroll:
@@ -365,16 +712,16 @@ sub_newl:
 sub_printc:
 	push rbx
 	push rsi
-	mov ebx, [console_cursor]
-	mov esi, console_buffer
-	add esi, ebx
-	mov byte [esi], al
-	inc esi
-	mov byte [esi], 0x17
-	inc ebx
-	inc ebx
-	mov [console_cursor], ebx
-	cmp ebx, 4000
+	mov rbx, [console_cursor]
+	mov rsi, console_buffer
+	add rsi, rbx
+	mov byte [rsi], al
+	inc rsi
+	mov byte [rsi], 0x17
+	inc rbx
+	inc rbx
+	mov [console_cursor], rbx
+	cmp rbx, 4000
 	jne sub_printc_no_scroll
 	call sub_scroll_line
 	sub_printc_no_scroll:
@@ -383,17 +730,17 @@ sub_printc:
 	ret
 
 ; Print string
-; ESI=string start
+; RSI=string start
 sub_prints:
 	pushf
 	push rax
 	push rsi
 	sub_prints_next:
-	mov al, [esi]
+	mov al, [rsi]
 	cmp al, 0
 	je sub_prints_done
 	call sub_printc
-	inc esi
+	inc rsi
 	jmp sub_prints_next
 	sub_prints_done:
 	pop rsi
@@ -402,7 +749,7 @@ sub_prints:
 	ret
 
 ; Print string and newline
-; ESI=string start
+; RSI=string start
 sub_printl:
 	call sub_prints
 	call sub_newl
@@ -438,23 +785,21 @@ sub_printhexc:
 	pop rax
 	ret
 
-; Print hex string
-; SI=data
-; CX=len
+; Print hex string, advance RSI to end
+; RSI=data
+; RCX=len
 sub_printhexs:
 	push rcx
-	push rsi
-	or ecx, ecx
+	or rcx, rcx
 	jz sub_printhexs_exit
 	sub_printhexs_next:
-	mov al, [esi]
+	mov al, [rsi]
 	call sub_printhexc
-	inc esi
-	dec cx
+	inc rsi
+	dec rcx
 	jz sub_printhexs_exit
 	jmp sub_printhexs_next
 	sub_printhexs_exit:
-	pop rsi
 	pop rcx
 	ret
 
@@ -466,6 +811,9 @@ msg_kernel_boot db 'KFX kernel booting...', 0
 msg_kernel_bad_magic db 'Bad kernel magic: ', 0
 msg_kernel_booted db 'Kernel booted successfully.', 0
 msg_kernel_panic db 'Panic - System halted.', 0
+msg_idt_start db 'Interrupt Descriptor Table:', 0
+msg_idt_entry db 'INT ', 0
+msg_idt_end db 'End of IDT.', 0
 msg_key_down db 'Key down: ', 0
 msg_key_up db 'Key up: ', 0
 msg_unknown_command db 'Unknown command: ', 0
@@ -474,10 +822,10 @@ db 'q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 0, '^', 13, 0
 db 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 0, 0, 0x27, 0, 0
 db 'z', 'x', 'c', 'v', 'b', 'n', 'm', ',', '.', '-'
 times 255-($-keyboard_map) db 0
-console_cursor dd 0
+console_cursor dq 0
 console_buffer times 2000 dw 0
 command_buffer times 256 db 0
-command_pos db 0
+command_pos dq 0
 
 align 8
 idt32_desc:				; Interrupt Descriptor Table info
@@ -524,10 +872,15 @@ gdt32_desc:				; Global Descriptor Table info
 	dw gdt32_end - gdt32 - 1	; GDT32 length (16 bit)
 	dd gdt32			; GDT32 location (32 bit)
 
+idt64:					; 64-bit Interrupt Descriptor Table
+	times 256 dq 0x0000000000000000	; space for 256 x 128-bit descriptors
+	times 256 dq 0x0000000000000000
+idt64_end:
+
 align 8
-idt64_desc:				; Interrupt Descriptor Table info
-	dw 0x0000			; IDT length (16-bit)
-	dq 0x0000000000000000		; IDT location (64-bit)
+idt64_desc:				; 64-bit Interrupt Descriptor Table info
+	dw idt64_end - idt64 - 1	; IDT length (16-bit)
+	dq idt64			; IDT location (64-bit)
 
 align 8
 gdt64:
@@ -539,7 +892,7 @@ gdt64_code:				; Code segment
 	dw 0x0000			; segment-limit-15-0
 	dw 0x0000			; base-address-15-0
 	db 0x00				; base-address-23-16
-	db 10011000b			; P(1), DPL(00), always(11), C(0), R(0), A(0), base-address-23-16(0)
+	db 10011000b			; P(1), DPL(00), always(11), C(0), R(0), A(0)
 	db 00100000b			; G(0), CS.D(0), CS.L(1), AVL(0), segment-limit-19-16(0)
 	db 0x00				; base-address-31-24
 
@@ -548,8 +901,8 @@ gdt64_data:				; Data segment
 	dw 0x0000			; segment-limit-15-0
 	dw 0x0000			; base-address-15-0
 	db 0x00				; base-address-23-16
-	db 10010000b			; P(1), DPL(00), always(10), C(0), R(0), A(0), base-address-23-16(0)
-	db 00000000b			; G(0), CS.D(0), CS.L(0), AVL(0), segment-limit-19-16(0)
+	db 10010010b			; P(1), DPL(00), always(10), E(0), W(1), A(0)
+	db 00000000b			; G(0), D/B(0), ?(0), AVL(0), segment-limit-19-16(0)
 	db 0x00				; base-address-31-24
 
 gdt64_end:
